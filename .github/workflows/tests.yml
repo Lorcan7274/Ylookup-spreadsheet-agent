@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: research
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LibreOffice (used to recalculate formulas, same engine as the scorer)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-calc
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: research/uv.lock
+
+      - name: Sync dependencies
+        run: uv sync --locked --extra tinker
+
+      - name: Download SpreadsheetBench dataset
+        run: uv run data/download.py
+
+      - name: Run tests
+        run: uv run pytest tests -q

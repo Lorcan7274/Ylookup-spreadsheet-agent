@@ -1,7 +1,7 @@
 # SpreadsheetBench pipeline container.
 #
 #   docker build -t team .
-#   docker run --rm -e OPENROUTER_API_KEY=... -v <dataset dir>:/data:ro -v <empty dir>:/out team
+#   docker run --rm -e TINKER_API_KEY=... -v <dataset dir>:/data:ro -v <empty dir>:/out team
 #
 # Reads /data (dataset.json, spreadsheet/<id>/*init*.xlsx, prompt.txt), writes
 # predictions.jsonl, outputs/, traces/, run.log to /out. Model-written code executes
@@ -21,17 +21,21 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# dependencies first, for layer caching
+# dependencies first, for layer caching. The submission agent samples Qwen through Tinker.
 COPY research/pyproject.toml research/uv.lock ./
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra tinker
 
 # code
 COPY research/sb.py sb.py
 COPY research/baseline/ baseline/
-COPY agent/ agent/
+COPY research/config/qwen.yaml config/qwen.yaml
+# agent_predict.py resolves its tool modules at /agent inside the image.
+COPY agent/ /agent/
+COPY docker_entrypoint.sh /app/docker_entrypoint.sh
+RUN chmod +x /app/docker_entrypoint.sh
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-# defaults inside run.py: --dataset-dir /data --out-dir /out
-# extra flags can be appended: docker run ... team --ids 13-1,51-12 --mode null
-ENTRYPOINT ["python", "agent/run.py"]
+# Run the base Qwen spreadsheet agent against the organiser's mounts. Extra flags
+# can be appended, for example: docker run ... team --ids 13-1,51-12
+ENTRYPOINT ["/app/docker_entrypoint.sh"]

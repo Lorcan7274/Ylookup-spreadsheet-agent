@@ -1,9 +1,13 @@
 # Default settings for Qwen inference through Tinker.
 # Command-line flags override these values, e.g. --max-tokens 32768.
 base_model: Qwen/Qwen3.8-27B
+# No model_path: the submitted inference pipeline samples the base model directly.
+# Experimental LoRA checkpoints are intentionally not used for this submission.
+# To opt into the completed epoch-2 LoRA experiment, uncomment:
+# model_path: tinker://2e7d3c8f-cf00-5c88-9e76-f74c4bb71f05:train:0/sampler_weights/spreadsheet-agent-epoch-2
 project_id: 14017256-055e-4590-a166-c4d55c6154a6
 renderer: qwen3_8_medium_reasoning   # start at medium: xhigh exhausts max_tokens while still thinking
-concurrency: 400
+concurrency: 100
 max_tokens: 32768
 temperature: 0
 fallback_renderers: auto

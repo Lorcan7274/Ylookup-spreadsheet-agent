@@ -4,7 +4,7 @@ Fast, deterministic checks of the pipeline: no model calls, no credits, no golde
 the evaluator. About 90 seconds.
 
 ```sh
-cd research && uv run --with pytest pytest tests -q
+cd research && uv run pytest tests -q
 ```
 
 | file | what it pins |

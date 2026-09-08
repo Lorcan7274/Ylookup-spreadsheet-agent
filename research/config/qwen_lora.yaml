@@ -9,3 +9,5 @@ epochs: 2
 batch_size: 4
 max_length: 32768
 seed: 20260905
+# Emit one durable JSON progress record per remote optimizer/validation step.
+log_every: 1

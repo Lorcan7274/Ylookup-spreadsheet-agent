@@ -10,6 +10,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -31,6 +32,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int)
     p.add_argument("--learning-rate", type=float)
     p.add_argument("--rank", type=int)
+    p.add_argument(
+        "--log-every",
+        type=int,
+        help="Write and print training progress every N optimizer steps (default: config value or 1)",
+    )
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
 
@@ -72,8 +78,38 @@ def batches(rows: list, size: int):
 
 
 def mean_loss(results: list) -> float | None:
-    values = [float(result.loss) for result in results if getattr(result, "loss", None) is not None]
+    values = [loss for result in results if (loss := result_loss(result)) is not None]
     return sum(values) / len(values) if values else None
+
+
+def result_metrics(result: object) -> dict[str, float]:
+    """Return the numeric Tinker metrics in a JSON-safe form."""
+    metrics = getattr(result, "metrics", {})
+    if not isinstance(metrics, dict):
+        return {}
+    return {str(name): float(value) for name, value in metrics.items() if isinstance(value, (int, float))}
+
+
+def result_loss(result: object) -> float | None:
+    """Tinker puts cross-entropy metrics on ``result.metrics``, not ``result.loss``."""
+    legacy_loss = getattr(result, "loss", None)
+    if isinstance(legacy_loss, (int, float)):
+        return float(legacy_loss)
+    metrics = result_metrics(result)
+    # Prefer a normalized loss if the installed Tinker version supplies one.
+    for name in ("loss:mean", "loss", "loss:sum"):
+        if name in metrics:
+            return metrics[name]
+    return None
+
+
+def emit_progress(progress_file: Path, event: dict) -> None:
+    """Make long remote training runs observable in both the terminal and on disk."""
+    line = json.dumps(event, ensure_ascii=False)
+    with progress_file.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+    print(line, flush=True)
 
 
 def main() -> None:
@@ -88,51 +124,112 @@ def main() -> None:
     rank = args.rank if args.rank is not None else int(config.get("rank", 16))
     max_length = int(config.get("max_length", 32768))
     seed = int(config.get("seed", 20260905))
+    log_every = args.log_every if args.log_every is not None else int(config.get("log_every", 1))
+    if log_every < 1:
+        raise ValueError("--log-every must be at least 1")
     train_rows = read_examples(Path(args.data))
     validation_rows = read_examples(Path(args.validation_data)) if args.validation_data else []
     summary = {"base_model": base_model, "renderer": renderer_name, "rank": rank, "epochs": epochs,
                "batch_size": batch_size, "learning_rate": learning_rate, "max_length": max_length,
-               "train_examples": len(train_rows), "validation_examples": len(validation_rows), "dry_run": args.dry_run}
+               "train_examples": len(train_rows), "validation_examples": len(validation_rows),
+               "log_every": log_every, "dry_run": args.dry_run}
     if not train_rows:
         raise ValueError("training data contains no examples")
     if args.dry_run:
         print(json.dumps(summary, indent=2))
         return
 
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    progress_file = out_dir / "progress.jsonl"
+    progress_file.write_text("", encoding="utf-8")
+    run_started = time.monotonic()
+    emit_progress(progress_file, {"event": "preparing_data", **summary})
+
     import tinker
     from tinker import types
     from tinker_cookbook import renderers
     from tinker_cookbook.tokenizer_utils import get_tokenizer
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     random.Random(seed).shuffle(train_rows)
     renderer = renderers.get_renderer(renderer_name, get_tokenizer(base_model))
     train_data = datum_examples(train_rows, renderer, max_length=max_length)
     validation_data = datum_examples(validation_rows, renderer, max_length=max_length) if validation_rows else []
+    emit_progress(progress_file, {
+        "event": "data_prepared", "train_examples": len(train_data), "validation_examples": len(validation_data),
+        "elapsed_seconds": round(time.monotonic() - run_started, 2),
+    })
     service = tinker.ServiceClient(project_id=config.get("project_id"))
     trainer = service.create_lora_training_client(base_model=base_model, rank=rank, seed=seed)
+    emit_progress(progress_file, {
+        "event": "training_client_created", "elapsed_seconds": round(time.monotonic() - run_started, 2),
+    })
     history = []
     step = 0
+    train_batches_per_epoch = (len(train_data) + batch_size - 1) // batch_size
+    validation_batches = (len(validation_data) + batch_size - 1) // batch_size
+    emit_progress(progress_file, {
+        "event": "training_started", "epochs": epochs, "train_batches_per_epoch": train_batches_per_epoch,
+        "validation_batches_per_epoch": validation_batches, "training_examples_per_epoch": len(train_data),
+        "total_training_example_passes": epochs * len(train_data),
+        "total_training_steps": epochs * train_batches_per_epoch,
+    })
     for epoch in range(1, epochs + 1):
         random.Random(seed + epoch).shuffle(train_data)
         train_results = []
-        for batch in batches(train_data, batch_size):
+        epoch_started = time.monotonic()
+        examples_seen_in_epoch = 0
+        for batch_index, batch in enumerate(batches(train_data, batch_size), start=1):
+            batch_started = time.monotonic()
             forward = trainer.forward_backward(batch, "cross_entropy")
             update = trainer.optim_step(types.AdamParams(learning_rate=learning_rate))
-            train_results.append(forward.result())
+            forward_result = forward.result()
+            train_results.append(forward_result)
             update.result()
             step += 1
+            examples_seen_in_epoch += len(batch)
+            if batch_index % log_every == 0 or batch_index == train_batches_per_epoch:
+                elapsed = time.monotonic() - run_started
+                completed = (epoch - 1) * train_batches_per_epoch + batch_index
+                seconds_per_step = elapsed / completed
+                emit_progress(progress_file, {
+                    "event": "train_progress", "epoch": epoch, "batch": batch_index,
+                    "batches_in_epoch": train_batches_per_epoch, "step": step,
+                    "examples_seen_in_epoch": examples_seen_in_epoch,
+                    "training_examples_per_epoch": len(train_data),
+                    "total_example_passes_seen": (epoch - 1) * len(train_data) + examples_seen_in_epoch,
+                    "total_training_example_passes": epochs * len(train_data),
+                    "total_training_steps": epochs * train_batches_per_epoch,
+                    "percent": round(100 * completed / (epochs * train_batches_per_epoch), 2),
+                    "loss": result_loss(forward_result),
+                    "loss_metrics": result_metrics(forward_result),
+                    "batch_seconds": round(time.monotonic() - batch_started, 2),
+                    "elapsed_seconds": round(elapsed, 2),
+                    "estimated_remaining_seconds": round(seconds_per_step * (epochs * train_batches_per_epoch - completed), 2),
+                })
         validation_loss = None
         if validation_data:
-            validation_loss = mean_loss([trainer.forward(batch, "cross_entropy").result() for batch in batches(validation_data, batch_size)])
+            validation_results = []
+            validation_examples_seen = 0
+            for validation_index, batch in enumerate(batches(validation_data, batch_size), start=1):
+                validation_results.append(trainer.forward(batch, "cross_entropy").result())
+                validation_examples_seen += len(batch)
+                if validation_index % log_every == 0 or validation_index == validation_batches:
+                    emit_progress(progress_file, {
+                        "event": "validation_progress", "epoch": epoch, "batch": validation_index,
+                        "batches_in_validation": validation_batches,
+                        "examples_seen": validation_examples_seen,
+                        "validation_examples": len(validation_data),
+                        "elapsed_seconds": round(time.monotonic() - run_started, 2),
+                    })
+            validation_loss = mean_loss(validation_results)
         checkpoint = trainer.save_weights_for_sampler(f"spreadsheet-agent-epoch-{epoch}").result().path
         state = trainer.save_state(f"spreadsheet-agent-step-{step}").result().path
         row = {"epoch": epoch, "step": step, "train_loss": mean_loss(train_results), "validation_loss": validation_loss,
                "sampler_path": checkpoint, "state_path": state}
         history.append(row)
         (out_dir / "training_state.json").write_text(json.dumps({**summary, "history": history}, indent=2) + "\n", encoding="utf-8")
-        print(json.dumps(row), flush=True)
+        emit_progress(progress_file, {"event": "epoch_complete", **row, "epoch_seconds": round(time.monotonic() - epoch_started, 2)})
 
 
 if __name__ == "__main__":

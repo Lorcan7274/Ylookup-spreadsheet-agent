@@ -92,6 +92,10 @@ def prepare_out_dir(out_dir: Path) -> None:
         shutil.rmtree(out_dir / sub, ignore_errors=True)
         (out_dir / sub).mkdir(parents=True)
     for name in ("predictions.jsonl", "run.log"):
+        # Docker's entrypoint has already opened run.log and may have captured
+        # startup output emitted before this function runs.
+        if name == "run.log" and os.environ.get("CAPTURE_STDIO_RUN_LOG") == "1":
+            continue
         (out_dir / name).write_text("", encoding="utf-8")
 
 
@@ -102,6 +106,10 @@ def append_jsonl(path: Path, record: dict) -> None:
 
 def log(out_dir: Path, line: str) -> None:
     print(line, flush=True)
+    # The Docker entrypoint captures complete stdout/stderr with tee. Writing here
+    # too would duplicate lines and let two processes append to run.log at once.
+    if os.environ.get("CAPTURE_STDIO_RUN_LOG") == "1":
+        return
     with (out_dir / "run.log").open("a", encoding="utf-8") as f:
         f.write(line + "\n")
 

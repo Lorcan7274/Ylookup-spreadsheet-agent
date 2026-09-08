@@ -6,6 +6,7 @@ results.json
 __pycache__/
 .env
 .venv/
+.DS_Store
 
 # datasets: raw downloads and generated train/test folders (large / reproducible)
 datasets/raw/

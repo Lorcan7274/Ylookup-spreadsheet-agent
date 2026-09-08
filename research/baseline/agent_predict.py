@@ -33,7 +33,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ids", help="comma-separated task ids (default: all)")
     p.add_argument("--config", default="config/qwen.yaml", help="YAML inference settings file")
     p.add_argument("--base-model", help="e.g. Qwen/Qwen3.8-27B")
-    p.add_argument("--model-path", help="tinker://... sampler checkpoint. Omit to sample the base model.")
+    p.add_argument(
+        "--model-path",
+        help="tinker://... sampler checkpoint. Overrides model_path in the YAML; omit both to sample the base model.",
+    )
     p.add_argument("--project-id", help="Tinker project ID for the sampling session")
     p.add_argument("--concurrency", type=int, help="parallel tasks")
     p.add_argument("--max-tokens", type=int, help="maximum output tokens for each model turn")
@@ -57,6 +60,9 @@ async def main() -> None:
     base_model = args.base_model or config.get("base_model")
     if not base_model:
         raise ValueError("base_model must be set in the YAML config or passed as --base-model")
+    # A command-line checkpoint is an explicit one-run override. Otherwise the
+    # config can select a LoRA sampler checkpoint for reproducible Docker runs.
+    model_path = args.model_path or config.get("model_path")
     project_id = args.project_id or config.get("project_id")
     concurrency = args.concurrency if args.concurrency is not None else config.get("concurrency", 4)
     max_tokens = args.max_tokens if args.max_tokens is not None else config.get("max_tokens", 8192)
@@ -74,7 +80,7 @@ async def main() -> None:
 
     print(f"Tinker project ID: {project_id or '<default project>'}", flush=True)
     sampler = tinker.ServiceClient(project_id=project_id).create_sampling_client(
-        base_model=base_model, model_path=args.model_path
+        base_model=base_model, model_path=model_path
     )
     renderer = renderers.get_renderer(renderer_name, get_tokenizer(base_model))
     params = types.SamplingParams(max_tokens=max_tokens, temperature=temperature, stop=renderer.get_stop_sequences())
@@ -85,14 +91,14 @@ async def main() -> None:
     tasks = selected_tasks(Path(args.dataset_dir), parse_ids(args.ids))
     out_dir = Path(args.out_dir)
     prepare_out_dir(out_dir)
-    log(out_dir, f"mode agent  model {args.model_path or base_model}  tasks {len(tasks)}  max_turns {max_turns} "
+    log(out_dir, f"mode agent  model {model_path or base_model}  tasks {len(tasks)}  max_turns {max_turns} "
                  f"review {review_after_edit} recalc {auto_recalculate} verify {verify_changes} critic {critic_enabled}")
-    model = TinkerModel(sampler, renderer, params, args.model_path or base_model)
+    model = TinkerModel(sampler, renderer, params, model_path or base_model)
     critic = None
     if critic_enabled:
         critic_params = types.SamplingParams(max_tokens=critic_max_tokens, temperature=temperature,
                                              stop=renderer.get_stop_sequences())
-        critic = TinkerModel(sampler, renderer, critic_params, f"{args.model_path or base_model}:critic")
+        critic = TinkerModel(sampler, renderer, critic_params, f"{model_path or base_model}:critic")
     semaphore = asyncio.Semaphore(concurrency)
 
     async def run_one(task: dict) -> None:
