@@ -1,11 +1,12 @@
-# Ylookup — a verification-first spreadsheet agent
+# A verification-first spreadsheet agent
 
 A multi-turn LLM agent that edits real Excel workbooks to follow natural-language
 instructions, and **checks its own work before it finishes**. On the 400-task
 [SpreadsheetBench](https://github.com/RUCKBReasoning/SpreadsheetBench) benchmark it
 reaches an **88.25% pass rate** (82.31% cell accuracy), graded by the shipped
 evaluator. Built at the Ylookup × Encode AI Hackathon, where it took **1st place in
-the research track**.
+the research track**. Ylookup is the company that co-organised the hackathon with
+Encode, not the name of this agent; the repository is simply named after the event.
 
 ## Why verification-first
 
